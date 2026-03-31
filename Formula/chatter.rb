@@ -2,7 +2,7 @@ class Chatter < Formula
   desc "Text-to-speech from the terminal, powered by Qwen3-TTS"
   homepage "https://github.com/isa/chatter"
   license "MIT"
-  version "1.0.0"
+  version "1.1.0"
 
   url "https://github.com/isa/chatter/archive/refs/tags/v#{version}.tar.gz"
   sha256 "8a9ec65dbe9c4ed2462075a160458f4689f6644e3a2a2c3ab651ec7bb9cec70c"
@@ -17,6 +17,8 @@ class Chatter < Formula
   def install
     # Tell PyO3 to link against Homebrew's Python 3.12
     ENV["PYO3_PYTHON"] = Formula["python@3.12"].opt_bin/python3
+    ENV["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    ENV["PIP_PROGRESS_BAR"] = "off"
 
     # Build the Rust binary (build.rs handles rpath for libpython)
     system "cargo", "install", *std_cargo_args
@@ -28,19 +30,35 @@ class Chatter < Formula
 
     # Determine which TTS backend to install based on platform
     pip = venv/"bin/pip"
-    if Hardware::CPU.arm? && OS.mac?
-      # Apple Silicon: use mlx-audio for optimized Metal inference (pinned deps)
-      system pip, "install", "--no-cache-dir", "--quiet", "--only-binary", ":all:", "-r", buildpath/"requirements-mlx.txt"
-    else
-      # CUDA or CPU fallback: use qwen-tts
-      system pip, "install", "--no-cache-dir", "qwen-tts"
+    used_runtime_bundle = false
+
+    # Optional fast-path: prebuilt runtime bundle.
+    # Maintainers can publish a tar.gz containing a preconfigured `venv/`
+    # tree and provide its URL via CHATTER_RUNTIME_BUNDLE_URL at build time.
+    runtime_bundle_url = ENV["CHATTER_RUNTIME_BUNDLE_URL"]
+    if runtime_bundle_url && !runtime_bundle_url.empty?
+      runtime_bundle = buildpath/"chatter-runtime-venv.tar.gz"
+      if system "curl", "-fL", runtime_bundle_url, "-o", runtime_bundle
+        system "tar", "-xzf", runtime_bundle, "-C", libexec
+        used_runtime_bundle = (libexec/"venv/bin/python").exist?
+      end
     end
 
-    # Install the bridge module into the venv's site-packages.
+    unless used_runtime_bundle
+      if Hardware::CPU.arm? && OS.mac?
+        # Apple Silicon: use mlx-audio for optimized Metal inference (pinned deps)
+        system pip, "install", "--no-cache-dir", "--quiet", "--only-binary", ":all:", "-r", buildpath/"requirements-mlx.txt"
+      else
+        # CUDA or CPU fallback: use qwen-tts
+        system pip, "install", "--no-cache-dir", "--quiet", "qwen-tts"
+      end
+    end
+
+    # Install the bridge package into the venv's site-packages.
     # The binary also does this at runtime (ensure_bridge_installed),
     # but pre-installing avoids a first-run write to the Cellar.
     site_packages = (venv/"lib").glob("python*/site-packages").first
-    cp "chatter_bridge.py", site_packages/"chatter_bridge.py"
+    cp_r "chatter_bridge", site_packages/"chatter_bridge"
   end
 
   def caveats
